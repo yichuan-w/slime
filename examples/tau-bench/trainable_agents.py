@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -123,7 +124,13 @@ class TrainableAgentMixin:
         Returns:
             Environment step result
         """
-        return env.step(action)
+        # env.step() calls the user simulator over the network (synchronous,
+        # blocking). This method is awaited inside the per-trajectory asyncio
+        # tasks that share ONE event loop, so calling env.step() directly blocks
+        # the loop and serializes ALL trajectories (only one user-sim call in
+        # flight at a time). Offload to a thread so the loop can advance other
+        # trajectories concurrently.
+        return await asyncio.to_thread(env.step, action)
 
     def _initialize_environment(self, env, task_index: int | None) -> tuple[str, dict[str, Any]]:
         """

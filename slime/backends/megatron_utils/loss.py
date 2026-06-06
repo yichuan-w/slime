@@ -613,8 +613,14 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
         return
 
     if args.kl_coef == 0 or not log_probs:
-        # when kl_coef is 0, we won't compute ref_log_prob
-        xs = log_probs or rollout_log_probs or values
+        # when kl_coef is 0, we won't compute ref_log_prob.
+        # NOTE: when `can_reuse_log_probs_in_loss` is True (kl_coef==0, single
+        # microbatch, policy_loss, ...), the actor old log_probs are intentionally
+        # NOT computed before this point (reused later in the loss), so `log_probs`
+        # is None here. `rollout_log_probs`/`values` are also None for vanilla GRPO
+        # -> `xs` would be None and crash. Fall back to any available per-token
+        # tensor list purely for SHAPE (kl_coef==0 -> the placeholder is zeros).
+        xs = log_probs or rollout_log_probs or values or ref_log_probs or loss_masks
         kl = [torch.zeros_like(x, dtype=torch.float32, device=x.device) for x in xs]
     else:
         kl = [

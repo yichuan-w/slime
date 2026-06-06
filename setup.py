@@ -21,7 +21,10 @@ class bdist_wheel(_bdist_wheel):
         abi_tag = f"{python_version}"
 
         if platform.system() == "Linux":
-            platform_tag = "manylinux1_x86_64"
+            machine = platform.machine()
+            # manylinux1 is only defined for x86_64/i686; use it there for wheel
+            # portability, but fall back to a plain linux tag on other arches (aarch64).
+            platform_tag = "manylinux1_x86_64" if machine == "x86_64" else f"linux_{machine}"
         else:
             platform_tag = platform.system().lower()
 
