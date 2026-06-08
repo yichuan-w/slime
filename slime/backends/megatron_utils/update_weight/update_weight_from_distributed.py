@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import time
 from argparse import Namespace
@@ -290,7 +291,10 @@ def connect_rollout_engines_from_distributed(
     if engine_gpu_counts is None:
         engine_gpu_counts = [args.rollout_num_gpus_per_engine] * len(rollout_engines)
 
-    master_address = ray._private.services.get_node_ip_address()
+    # Honor SLIME_NODE_IP (loopback on this IPv6-only box). Using the raw node IP
+    # yields a bare IPv6 addr, which breaks both NCCL init_method and the
+    # rollout-engine side URL parsing ("Port could not be cast to integer").
+    master_address = os.environ.get("SLIME_NODE_IP") or ray._private.services.get_node_ip_address()
     with socket.socket() as sock:
         sock.bind(("", 0))
         master_port = sock.getsockname()[1]

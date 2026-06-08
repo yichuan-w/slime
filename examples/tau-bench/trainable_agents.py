@@ -209,8 +209,12 @@ class TrainableAgentMixin:
         state = GenerateState(rollout_args)
         url = f"http://{rollout_args.sglang_router_ip}:" f"{rollout_args.sglang_router_port}/generate"
 
-        # Get initial environment state
-        obs, info = self._initialize_environment(env, task_index)
+        # Get initial environment state. env.reset() makes a SYNC user-sim
+        # (MetaGen) call; calling it directly would block the asyncio loop and
+        # serialize every trajectory's reset (model sits idle, only one user-sim
+        # call in flight). Offload to a thread like env.step() so resets run
+        # concurrently.
+        obs, info = await asyncio.to_thread(self._initialize_environment, env, task_index)
 
         # Build initial conversation
         messages = self._build_initial_messages(obs)

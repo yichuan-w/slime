@@ -1,4 +1,5 @@
 import importlib
+import os
 import subprocess
 
 from slime.utils.http_utils import is_port_available
@@ -54,6 +55,13 @@ def exec_command(cmd: str, capture_output: bool = False) -> str | None:
 
 
 def get_current_node_ip():
+    # Allow forcing the node IP (e.g. to IPv4 loopback on single-node boxes whose
+    # default route is IPv6, where Ray would otherwise hand back an IPv6 address
+    # that breaks sglang's host bind + health probe).
+    override = os.environ.get("SLIME_NODE_IP")
+    if override:
+        return override
+
     # Lazy import so CPU-only code paths (rm_hub scoring, plugin contracts,
     # etc.) can use other helpers in this module without requiring ray.
     import ray

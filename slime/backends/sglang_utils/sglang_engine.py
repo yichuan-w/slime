@@ -469,12 +469,41 @@ class SGLangEngine(RayActor):
         )
 
     def pause_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
-        response.raise_for_status()
-        return response
+        base = f"http://{self.server_host}:{self.server_port}"
+        # Abort any in-flight / queued sequences first. Custom rollout paths (e.g.
+        # tau-bench) bypass slime's abort(), so the scheduler can still hold
+        # straggler requests after generate() returns; /pause_generation then blocks
+        # forever waiting for them to drain (gloo barrier in update_weights times
+        # out at 30 min). Aborting drains the queue so pause can proceed.
+        try:
+            requests.post(f"{base}/abort_request", json={"abort_all": True}, timeout=30)
+        except Exception as e:
+            logger.info(f"abort_request before pause failed (continuing): {e}")
+        # Pause with mode="in_place". The sglang default is mode="abort", which
+        # spins in tokenizer_manager waiting for model_update_lock to release; a
+        # straggler /generate from a custom rollout (tau-bench) holds that lock
+        # forever, so /pause_generation never returns (gloo barrier 30-min timeout).
+        # "in_place" just sets the pause flag and returns immediately. We already
+        # aborted in-flight requests above, and sync-mode training has no
+        # concurrent generation, so draining via "abort" mode is unnecessary.
+        # Timeout + retry mirror flush_cache's loop so a busy scheduler can't wedge
+        # the whole training run.
+        last_exc = None
+        for _ in range(60):
+            try:
+                response = requests.post(f"{base}/pause_generation", json={"mode": "in_place"}, timeout=30)
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                last_exc = e
+                logger.info(f"Error pausing generation (retrying): {e}")
+                time.sleep(1)
+        raise TimeoutError(f"Timeout while pausing generation: {last_exc}")
 
     def continue_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/continue_generation", json={})
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/continue_generation", json={}, timeout=60
+        )
         response.raise_for_status()
         return response
 

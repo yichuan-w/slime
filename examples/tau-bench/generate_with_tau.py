@@ -6,6 +6,7 @@ using the slime framework. It handles agent-environment interactions and convert
 results to the format expected by slime's training pipeline.
 """
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -57,7 +58,13 @@ import tau_bench.envs.user as _tau_user  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 _oai_client = OpenAI(api_key=_LLAMA_KEY, base_url=TAU_USER_BASE_URL.rstrip("/") + "/")
+# NOTE: keep this modest. Higher user-sim concurrency grows sglang's KV pool
+# during colocated rollout and fragments GPU memory, which makes the train-resume
+# (torch_memory_saver cu_mem_create) OOM even with tens of GB free. 16 is the
+# value that reliably completes the rollout->train memory swap on this box.
 _USER_SIM_SEM = threading.Semaphore(int(os.environ.get("TAU_USER_MAX_CONCURRENCY", "16")))
+# Set once on first generate() call to enlarge the asyncio default thread pool.
+_executor_configured = False
 _MAX_RL_RETRIES = int(os.environ.get("TAU_USER_MAX_RETRIES", "20"))
 
 
@@ -244,6 +251,22 @@ async def generate(args: dict[str, Any], sample: Sample, sampling_params: dict) 
     # Validate arguments
     assert not args.partial_rollout, "Partial rollout is not supported for tau-bench interactions."
 
+    # The user-sim calls (get_env/reset/step) run via asyncio.to_thread, whose
+    # default executor caps at min(32, cpu+4)=32 workers — that caps effective
+    # user-sim concurrency regardless of the semaphore. Enlarge the loop's default
+    # executor once so we can actually run TAU_USER_MAX_CONCURRENCY calls at once.
+    # Safe without a lock: there is no `await` between the check and the set, and
+    # all generate() coroutines share one single-threaded event loop.
+    global _executor_configured
+    if not _executor_configured:
+        _executor_configured = True
+        from concurrent.futures import ThreadPoolExecutor
+
+        _pool_size = int(os.environ.get("TAU_THREAD_POOL", "64"))
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=_pool_size, thread_name_prefix="tau-usersim")
+        )
+
     # Extract task index from sample prompt
     task_index = int(sample.prompt)
     logger.info(f"Starting agent-environment interaction for task {task_index}")
@@ -257,7 +280,13 @@ async def generate(args: dict[str, Any], sample: Sample, sampling_params: dict) 
     max_traj_retries = max(1, int(os.environ.get("TAU_TRAJ_RETRIES", "4")))
     interaction_result = None
     for attempt in range(max_traj_retries):
-        env = get_env(
+        # get_env() constructs the env, whose __init__ resets the user simulator
+        # and makes a SYNC user-sim (MetaGen) call. Called directly it blocks the
+        # asyncio event loop and serializes every trajectory (model sits idle,
+        # only one user-sim call in flight). Offload to a thread so trajectories
+        # set up concurrently.
+        env = await asyncio.to_thread(
+            get_env,
             env_name=tau_config.env,
             user_strategy=tau_config.user_strategy,
             user_model=tau_config.user_model,
